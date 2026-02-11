@@ -1214,6 +1214,75 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     }
   };
 
+  const getGooglePlacesSuggestions = async (textQuery, signal) => {
+    if (!googleApiKey || googleDisabledRef.current) {
+      return [];
+    }
+
+    try {
+      const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': googleApiKey,
+          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location,places.types,places.id'
+        },
+        body: JSON.stringify({
+          textQuery,
+          languageCode: 'en',
+          maxResultCount: 3
+        })
+      });
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const data = await response.json();
+      const places = data?.places || [];
+      
+      return places
+        .filter(place => place?.location)
+        .map((place, index) => {
+          const latitude = place.location.latitude ?? place.location.lat;
+          const longitude = place.location.longitude ?? place.location.lng;
+          
+          if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+            return null;
+          }
+
+          const displayName = place.displayName?.text || '';
+          const formattedAddress = place.formattedAddress || '';
+          
+          // Extract country for flag
+          const addressParts = formattedAddress.split(',').map(p => p.trim());
+          const country = addressParts[addressParts.length - 1] || '';
+          
+          return {
+            id: `google-${place.id || index}`,
+            mapboxId: null,
+            name: displayName,
+            subtitle: formattedAddress,
+            featureType: 'poi',
+            flag: '🌐',
+            feature: {
+              center: [longitude, latitude],
+              place_type: mapGoogleTypesToPlaceType(place.types),
+              bbox: googleViewportToBbox(place.viewport),
+              text: displayName || formattedAddress
+            }
+          };
+        })
+        .filter(Boolean);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        return [];
+      }
+      return [];
+    }
+  };
+
   const normalizeSearchboxSuggestion = (suggestion) => {
     const countryCode = suggestion?.context?.country?.country_code;
     const countryName = suggestion?.context?.country?.name;
@@ -1241,8 +1310,12 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     const hasStreetWord = /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|ct|court|way|pl|place|suite)\b/.test(q);
     const hasComma = q.includes(',');
     const hasManyWords = q.split(/\s+/).length >= 3;
+    
+    // Landmark/POI indicators
+    const landmarkKeywords = /\b(tower|center|centre|stadium|arena|garden|park|building|bridge|museum|hotel|airport|station|hall|square|palace|temple|church|cathedral|mall|theatre|theater|casino|pier|wharf|fort|castle)\b/;
+    const hasLandmarkKeyword = landmarkKeywords.test(q);
 
-    if (hasNumber || hasStreetWord || hasComma || hasManyWords) {
+    if (hasNumber || hasStreetWord || hasComma || hasManyWords || hasLandmarkKeyword) {
       return 'specific';
     }
 
@@ -1522,11 +1595,51 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const fetchDynamicSuggestions = async (textQuery, signal) => {
     try {
       const intent = inferSearchIntent(textQuery);
-      const suggestions =
+      
+      // Fetch suggestions from multiple sources in parallel
+      const [mapboxSuggestions, googleSuggestions] = await Promise.all([
         intent === 'broad'
-          ? await geocodeBroadSuggestions(textQuery, signal)
-          : await searchboxSuggest(textQuery, signal);
-      return suggestions;
+          ? geocodeBroadSuggestions(textQuery, signal)
+          : searchboxSuggest(textQuery, signal),
+        getGooglePlacesSuggestions(textQuery, signal)
+      ]);
+
+      // Merge results, prioritizing Google Places for POIs and specific landmarks
+      const combined = [];
+      const seen = new Set();
+
+      // Add Google Places results first for specific queries (they're usually better for landmarks)
+      if (intent === 'specific' || textQuery.split(/\s+/).length >= 2) {
+        googleSuggestions.forEach(suggestion => {
+          const key = `${suggestion.name.toLowerCase()}|${suggestion.subtitle.toLowerCase()}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            combined.push(suggestion);
+          }
+        });
+      }
+
+      // Add Mapbox results
+      mapboxSuggestions.forEach(suggestion => {
+        const key = `${suggestion.name.toLowerCase()}|${suggestion.subtitle.toLowerCase()}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          combined.push(suggestion);
+        }
+      });
+
+      // Add remaining Google results if broad query
+      if (intent === 'broad') {
+        googleSuggestions.forEach(suggestion => {
+          const key = `${suggestion.name.toLowerCase()}|${suggestion.subtitle.toLowerCase()}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            combined.push(suggestion);
+          }
+        });
+      }
+
+      return combined;
     } catch (error) {
       if (error.name === 'AbortError') return [];
       return [];

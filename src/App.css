@@ -56,7 +56,7 @@ select {
 
 @media (hover: hover) and (pointer: fine) {
   #map canvas {
-    filter: grayscale(0.72) saturate(0.86) contrast(1.2) brightness(1.03);
+    filter: grayscale(0.5) saturate(1.0) contrast(1.25) brightness(1.02);
   }
 }
 
