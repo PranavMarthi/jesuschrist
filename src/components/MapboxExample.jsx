@@ -8,6 +8,9 @@ mapboxgl.accessToken = 'pk.eyJ1IjoicG1hcnRoaSIsImEiOiJjbWxjbm1qYXQxMWRlM2Zwb2J1Y
 mapboxgl.prewarm();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const POLYWORLD_API_BASE_URL = (import.meta.env.VITE_POLYWORLD_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+const BASE_MAP_STYLE = 'mapbox://styles/mapbox/streets-v12';
+const MARKET_COORDS_SOURCE_ID = 'market-coordinates-source';
+const MARKET_COORDS_LAYER_ID = 'market-coordinates-layer';
 
 const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => {
   const mapContainerRef = useRef();
@@ -26,8 +29,13 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const cameraTransitionRef = useRef(0);
   const spinEnabledRef = useRef(true);
   const userInteractingRef = useRef(false);
+  const isRepairingMobileRef = useRef(false);
   const viewModeRef = useRef('instructions');
   const eventsModalOpenRef = useRef(false);
+  const marketCoordinatesGeoJSONRef = useRef({ type: 'FeatureCollection', features: [] });
+  const marketCoordinatesLoadedRef = useRef(false);
+  const marketCoordinatesAbortRef = useRef(null);
+  const marketHoverLabelRef = useRef(null);
   const initialViewRef = useRef({
     center: [-100.486052, 30],
     zoom: 1.94,
@@ -59,6 +67,145 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     viewModeRef.current = mode;
     setViewMode(mode);
   }, []);
+
+  const isMobileDevice = useCallback(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(hover: none), (pointer: coarse)').matches;
+  }, []);
+
+  const repairMobileGlobeIfBlank = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || isRepairingMobileRef.current) return;
+
+    const isLikelyMobile = isMobileDevice();
+    if (!isLikelyMobile) return;
+    if (!map.isStyleLoaded()) return;
+
+    const centerPoint = map.project(map.getCenter());
+    const features = map.queryRenderedFeatures([centerPoint.x, centerPoint.y]);
+    const hasNonSymbolFeatures = features.some((feature) => feature?.layer?.type && feature.layer.type !== 'symbol');
+    if (hasNonSymbolFeatures) return;
+
+    isRepairingMobileRef.current = true;
+    map.resize();
+    map.triggerRepaint();
+
+    if (map.getProjection()?.name === 'globe') {
+      map.setProjection('mercator');
+      map.resize();
+      map.triggerRepaint();
+    }
+
+    setTimeout(() => {
+      isRepairingMobileRef.current = false;
+    }, 220);
+  }, [isMobileDevice]);
+
+  const scheduleMapResize = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    requestAnimationFrame(() => {
+      map.resize();
+    });
+  }, []);
+
+  const ensureMarketCoordinatesLayer = useCallback((map) => {
+    if (!map) return;
+
+    if (!map.getSource(MARKET_COORDS_SOURCE_ID)) {
+      map.addSource(MARKET_COORDS_SOURCE_ID, {
+        type: 'geojson',
+        data: marketCoordinatesGeoJSONRef.current
+      });
+    }
+
+    if (!map.getLayer(MARKET_COORDS_LAYER_ID)) {
+      map.addLayer({
+        id: MARKET_COORDS_LAYER_ID,
+        type: 'circle',
+        source: MARKET_COORDS_SOURCE_ID,
+        paint: {
+          'circle-radius': 3,
+          'circle-color': '#ff1200',
+          'circle-stroke-width': 1,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+    }
+  }, []);
+
+  const loadMarketCoordinates = useCallback(async () => {
+    if (marketCoordinatesLoadedRef.current || marketCoordinatesAbortRef.current) return;
+
+    const controller = new AbortController();
+    marketCoordinatesAbortRef.current = controller;
+
+    try {
+      const response = await fetch(`${POLYWORLD_API_BASE_URL}/api/v1/markets/coordinates`, {
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const rows = Array.isArray(payload?.coordinates) ? payload.coordinates : [];
+
+      const validRows = rows.filter((row) => Number.isFinite(row?.longitude) && Number.isFinite(row?.latitude));
+
+      const overlapCounts = new Map();
+      validRows.forEach((row) => {
+        const key = `${Number(row.longitude).toFixed(5)},${Number(row.latitude).toFixed(5)}`;
+        overlapCounts.set(key, (overlapCounts.get(key) || 0) + 1);
+      });
+
+      const features = validRows.map((row, index) => {
+        const coordinateKey = `${Number(row.longitude).toFixed(5)},${Number(row.latitude).toFixed(5)}`;
+        const overlapCount = overlapCounts.get(coordinateKey) || 1;
+
+        return {
+          type: 'Feature',
+          geometry: {
+            type: 'Point',
+            coordinates: [row.longitude, row.latitude]
+          },
+          properties: {
+            id: `${row.question || 'market'}-${index}`,
+            question: row.question || '',
+            location_name: row.location_name || '',
+            overlap_count: overlapCount,
+            coordinate_key: coordinateKey
+          }
+        };
+      });
+
+      marketCoordinatesGeoJSONRef.current = {
+        type: 'FeatureCollection',
+        features
+      };
+
+      marketCoordinatesLoadedRef.current = true;
+
+      const map = mapRef.current;
+      if (map) {
+        ensureMarketCoordinatesLayer(map);
+        const source = map.getSource(MARKET_COORDS_SOURCE_ID);
+        if (source?.setData) {
+          source.setData(marketCoordinatesGeoJSONRef.current);
+        }
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        console.error('[Markets] failed to load coordinates', error);
+      }
+    } finally {
+      if (marketCoordinatesAbortRef.current === controller) {
+        marketCoordinatesAbortRef.current = null;
+      }
+    }
+  }, [ensureMarketCoordinatesLayer]);
 
   const quickLocations = useMemo(
     () => [
@@ -522,6 +669,19 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     const runFinalFly = () => {
       if (cameraTransitionRef.current !== transitionId) return;
 
+      if (isMobileDevice()) {
+        map.flyTo({
+          center,
+          zoom: camera.zoom,
+          pitch: 0,
+          bearing: 0,
+          essential: true,
+          duration: 1050,
+          easing: (t) => 1 - Math.pow(1 - t, 3)
+        });
+        return;
+      }
+
       if (map.getProjection()?.name !== 'mercator') {
         map.setProjection('mercator');
       }
@@ -588,99 +748,144 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setIsSearchOpen(false);
   };
 
-  const fetchAssociatedEvents = useCallback(async (locationQuery) => {
-    const normalized = typeof locationQuery === 'string' ? locationQuery.trim() : '';
-    const lookupKey = normalized.toLowerCase();
-    if (!normalized || lookupKey === lastEventsLookupRef.current) return;
-    lastEventsLookupRef.current = lookupKey;
+  const parseRegionCountry = (placeName) => {
+    const parts = (placeName || '').split(',').map((part) => part.trim()).filter(Boolean);
+    return {
+      region: parts.length >= 2 ? parts[parts.length - 2] : null,
+      country: parts.length >= 1 ? parts[parts.length - 1] : null
+    };
+  };
 
-    try {
-      const pageSize = 1000;
-      let offset = 0;
-      let hasMore = true;
-      let totalCount = 0;
-      let mode = 'exact';
-      const allResults = [];
+  const buildPlacePayloadFromFeature = (feature, fallbackName = '') => {
+    const placeName = typeof feature?.place_name === 'string' ? feature.place_name.trim() : '';
+    const name = typeof feature?.text === 'string' ? feature.text.trim() : fallbackName;
+    const placeType = Array.isArray(feature?.place_type) ? feature.place_type : [];
+    const center = Array.isArray(feature?.center) && feature.center.length >= 2
+      ? { lng: feature.center[0], lat: feature.center[1] }
+      : null;
 
-      while (hasMore) {
-        const params = new URLSearchParams({
-          location: normalized,
-          strict: 'false',
-          limit: String(pageSize),
-          offset: String(offset)
-        });
+    const { region, country } = parseRegionCountry(placeName);
 
-        const response = await fetch(`${POLYWORLD_API_BASE_URL}/api/v1/events/by-location?${params.toString()}`);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
+    return {
+      name: name || placeName || fallbackName,
+      place_name: placeName || fallbackName,
+      place_type: placeType,
+      center,
+      region,
+      country,
+      strict_intent: true
+    };
+  };
 
-        const payload = await response.json();
-        totalCount = payload.count;
-        mode = payload.mode;
-        allResults.push(...(Array.isArray(payload.results) ? payload.results : []));
-        hasMore = Boolean(payload.has_more);
-        offset += pageSize;
-      }
-
-      console.log('[Polyworld events]', {
-        location: normalized,
-        count: totalCount,
-        mode,
-        results: allResults
-      });
-
-      setEventsModalLocation(normalized);
-      setAssociatedEvents(allResults);
-      setIsEventsModalOpen(true);
-    } catch (error) {
-      console.error('[Polyworld events] lookup failed', normalized, error);
-    }
-  }, []);
-
-  const getLookupQueryFromResult = (result) => {
-    if (!result) return '';
+  const buildPlacePayloadFromResult = (result) => {
+    if (!result) return null;
 
     if (result.kind === 'quick') {
-      return result.location.subtitle || result.location.name || '';
+      const { region, country } = parseRegionCountry(result.location.subtitle || '');
+      return {
+        name: result.location.name,
+        place_name: result.location.subtitle || result.location.name,
+        place_type: ['place'],
+        center: { lng: result.location.center[0], lat: result.location.center[1] },
+        region,
+        country,
+        strict_intent: true
+      };
     }
 
     if (result.kind === 'landmark') {
-      return result.landmark.subtitle || result.landmark.name || '';
+      return buildPlacePayloadFromFeature(result.landmark.feature, result.landmark.name);
     }
 
     if (result.kind === 'dynamic') {
-      return result.suggestion.subtitle || result.suggestion.name || '';
+      if (result.suggestion.feature) {
+        return buildPlacePayloadFromFeature(result.suggestion.feature, result.suggestion.name);
+      }
+      const { region, country } = parseRegionCountry(result.suggestion.subtitle || '');
+      return {
+        name: result.suggestion.name || result.suggestion.subtitle || '',
+        place_name: result.suggestion.subtitle || result.suggestion.name || '',
+        place_type: [],
+        center: null,
+        region,
+        country,
+        strict_intent: true
+      };
     }
 
-    return '';
+    return null;
   };
 
-  const getLookupQueryFromFeature = (feature, fallback = '') => {
-    if (!feature || typeof feature !== 'object') return fallback;
-    const placeName = typeof feature.place_name === 'string' ? feature.place_name.trim() : '';
-    const text = typeof feature.text === 'string' ? feature.text.trim() : '';
-    return placeName || text || fallback;
-  };
+  const fetchAssociatedEvents = useCallback(async (placePayload) => {
+    if (!placePayload || typeof placePayload !== 'object') return;
+
+    const displayName = (placePayload.place_name || placePayload.name || '').trim();
+    if (!displayName) return;
+
+    const lookupKey = JSON.stringify({
+      name: (placePayload.name || '').toLowerCase(),
+      place_name: (placePayload.place_name || '').toLowerCase(),
+      place_type: Array.isArray(placePayload.place_type) ? placePayload.place_type : []
+    });
+
+    if (lookupKey === lastEventsLookupRef.current) return;
+    lastEventsLookupRef.current = lookupKey;
+
+    try {
+      const response = await fetch(`${POLYWORLD_API_BASE_URL}/api/v1/events/by-place`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(placePayload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+
+      console.log('[Polyworld events]', {
+        place_name: payload.place_name,
+        matched_scope: payload.matched_scope,
+        count: payload.count,
+        results: payload.results
+      });
+
+      setEventsModalLocation(payload.place_name || displayName);
+      setAssociatedEvents(Array.isArray(payload.results) ? payload.results : []);
+      setIsEventsModalOpen(true);
+    } catch (error) {
+      console.error('[Polyworld events] lookup failed', displayName, error);
+    }
+  }, []);
 
   const selectResult = async (result) => {
     if (!result) return;
 
     if (result.kind === 'landmark') {
-      void fetchAssociatedEvents(getLookupQueryFromResult(result));
+      const placePayload = buildPlacePayloadFromResult(result);
+      if (placePayload) {
+        void fetchAssociatedEvents(placePayload);
+      }
       flyToFeature(result.landmark.feature);
       return;
     }
 
     if (result.kind === 'quick') {
-      void fetchAssociatedEvents(getLookupQueryFromResult(result));
+      const placePayload = buildPlacePayloadFromResult(result);
+      if (placePayload) {
+        void fetchAssociatedEvents(placePayload);
+      }
       flyToLocation(result.location.center, result.location.camera);
       return;
     }
 
     if (result.kind === 'dynamic') {
-      void fetchAssociatedEvents(getLookupQueryFromResult(result));
       if (result.suggestion.feature) {
+        const placePayload = buildPlacePayloadFromResult(result);
+        if (placePayload) {
+          void fetchAssociatedEvents(placePayload);
+        }
         flyToFeature(result.suggestion.feature);
         return;
       }
@@ -702,6 +907,8 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
           setSearchError('Could not open this location.');
           return;
         }
+        const placePayload = buildPlacePayloadFromFeature(feature, result.suggestion.name || result.suggestion.subtitle || '');
+        void fetchAssociatedEvents(placePayload);
         flyToFeature(feature);
       } catch (error) {
         if (error.name !== 'AbortError') {
@@ -817,6 +1024,24 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
       const runFinalBounds = () => {
         if (cameraTransitionRef.current !== transitionId) return;
+
+        if (isMobileDevice()) {
+          map.fitBounds(
+            [
+              [minLng, minLat],
+              [maxLng, maxLat]
+            ],
+            {
+              padding: { top: 96, right: 96, bottom: 96, left: 96 },
+              maxZoom: camera.zoom,
+              pitch: 0,
+              bearing: 0,
+              duration: 1000,
+              essential: true
+            }
+          );
+          return;
+        }
 
         if (map.getProjection()?.name !== 'mercator') {
           map.setProjection('mercator');
@@ -1328,7 +1553,15 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     if (!trimmedQuery) {
       const quickLocation = filteredLocations[activeLocationIndex] || quickLocations[0];
       if (quickLocation) {
-        void fetchAssociatedEvents(quickLocation.subtitle || quickLocation.name);
+        void fetchAssociatedEvents({
+          name: quickLocation.name,
+          place_name: quickLocation.subtitle || quickLocation.name,
+          place_type: ['place'],
+          center: { lng: quickLocation.center[0], lat: quickLocation.center[1] },
+          region: (quickLocation.subtitle || '').split(',').at(-2)?.trim() || null,
+          country: (quickLocation.subtitle || '').split(',').at(-1)?.trim() || null,
+          strict_intent: true
+        });
         flyToLocation(quickLocation.center, quickLocation.camera);
       }
       return;
@@ -1339,7 +1572,15 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     );
 
     if (exactQuickLocation) {
-      void fetchAssociatedEvents(exactQuickLocation.subtitle || exactQuickLocation.name);
+      void fetchAssociatedEvents({
+        name: exactQuickLocation.name,
+        place_name: exactQuickLocation.subtitle || exactQuickLocation.name,
+        place_type: ['place'],
+        center: { lng: exactQuickLocation.center[0], lat: exactQuickLocation.center[1] },
+        region: (exactQuickLocation.subtitle || '').split(',').at(-2)?.trim() || null,
+        country: (exactQuickLocation.subtitle || '').split(',').at(-1)?.trim() || null,
+        strict_intent: true
+      });
       flyToLocation(exactQuickLocation.center, exactQuickLocation.camera);
       return;
     }
@@ -1433,16 +1674,12 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
       searchCacheRef.current.set(cacheKey, { feature, timestamp: Date.now() });
 
-      const activeLookupQuery = getLookupQueryFromResult(activeResult);
-      const resolvedLookupQuery = getLookupQueryFromFeature(feature, trimmedQuery);
-      const backendLookupQuery = activeLookupQuery || resolvedLookupQuery || trimmedQuery;
+      const selectedPlacePayload = manualSelection && activeResult
+        ? buildPlacePayloadFromResult(activeResult)
+        : null;
+      const resolvedPlacePayload = buildPlacePayloadFromFeature(feature, trimmedQuery);
 
-      console.log('[Polyworld events] lookup source', {
-        typed_query: trimmedQuery,
-        resolved_lookup_query: backendLookupQuery
-      });
-
-      void fetchAssociatedEvents(backendLookupQuery);
+      void fetchAssociatedEvents(selectedPlacePayload || resolvedPlacePayload);
       flyToFeature(feature);
     } catch (error) {
       if (error.name === 'AbortError') return;
@@ -1463,6 +1700,11 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   };
 
   const returnToInstructionsView = useCallback(() => {
+    if (isMobileDevice()) {
+      window.location.reload();
+      return;
+    }
+
     const map = mapRef.current;
     if (!map) {
       if (onReturnToInstructions) onReturnToInstructions();
@@ -1486,7 +1728,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     spinEnabledRef.current = false;
     userInteractingRef.current = false;
 
-    map.setProjection('globe');
+    if (map.getProjection()?.name !== 'globe') {
+      map.setProjection('globe');
+    }
     applyNoGlowAtmosphere();
 
     map.flyTo({
@@ -1508,9 +1752,14 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setViewModeState('instructions');
 
     if (onReturnToInstructions) onReturnToInstructions();
-  }, [onReturnToInstructions, setViewModeState]);
+  }, [isMobileDevice, onReturnToInstructions, setViewModeState]);
 
   const returnToBrowseGlobeView = useCallback(() => {
+    if (isMobileDevice()) {
+      window.location.reload();
+      return;
+    }
+
     const map = mapRef.current;
     if (!map) return;
 
@@ -1533,7 +1782,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     spinEnabledRef.current = false;
     userInteractingRef.current = false;
 
-    map.setProjection('globe');
+    if (map.getProjection()?.name !== 'globe') {
+      map.setProjection('globe');
+    }
     applyNoGlowAtmosphere();
 
     map.flyTo({
@@ -1553,7 +1804,16 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     });
 
     setViewModeState('browse');
-  }, [setViewModeState]);
+  }, [isMobileDevice, setViewModeState]);
+
+  const handleBackButtonClick = useCallback(() => {
+    if (isMobileDevice()) {
+      window.location.reload();
+      return;
+    }
+
+    returnToInstructionsView();
+  }, [isMobileDevice, returnToInstructionsView]);
 
   const handleSpotlightKeyDown = (event) => {
     if (!displayResults.length) return;
@@ -1607,6 +1867,31 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     return () => cancelAnimationFrame(frame);
   }, [isSearchOpen, renderSearch]);
+
+  useEffect(() => {
+    scheduleMapResize();
+    const timer = setTimeout(() => {
+      scheduleMapResize();
+      repairMobileGlobeIfBlank();
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [renderSearch, isSearchOpen, isEventsModalOpen, onboardingPhase, scheduleMapResize, repairMobileGlobeIfBlank]);
+
+  useEffect(() => {
+    const handleViewportChange = () => {
+      scheduleMapResize();
+      repairMobileGlobeIfBlank();
+    };
+
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('orientationchange', handleViewportChange);
+
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('orientationchange', handleViewportChange);
+    };
+  }, [scheduleMapResize, repairMobileGlobeIfBlank]);
 
   useEffect(() => {
     if (openAnimationTimerRef.current) {
@@ -1665,7 +1950,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     hasCompletedOnboardingRef.current = true;
     const finalZoom = 2.14;
-    map.setProjection('globe');
+    if (map.getProjection()?.name !== 'globe') {
+      map.setProjection('globe');
+    }
     applyNoGlowAtmosphere();
 
     map.easeTo({
@@ -1751,7 +2038,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   useEffect(() => {
     mapRef.current = new mapboxgl.Map({
       container: mapContainerRef.current,
-      style: 'mapbox://styles/mapbox/streets-v12',
+      style: BASE_MAP_STYLE,
       center: initialViewRef.current.center,
       zoom: initialViewRef.current.zoom,
       minZoom: initialViewRef.current.zoom,
@@ -1760,6 +2047,29 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     });
 
     mapRef.current.setPadding(initialGlobePaddingRef.current);
+
+    const hoverLabelEl = document.createElement('div');
+    hoverLabelEl.className = 'market-hover-count';
+    hoverLabelEl.style.display = 'none';
+    mapRef.current.getContainer().appendChild(hoverLabelEl);
+    marketHoverLabelRef.current = hoverLabelEl;
+
+    const mapCanvas = mapRef.current.getCanvas();
+    const handleContextLost = (event) => {
+      event.preventDefault();
+      console.warn('[Mapbox] WebGL context lost');
+    };
+    const handleContextRestored = () => {
+      const map = mapRef.current;
+      if (!map) return;
+      console.warn('[Mapbox] WebGL context restored');
+      map.resize();
+      applyNoGlowAtmosphere();
+      add3DBuildingsLayer();
+    };
+
+    mapCanvas.addEventListener('webglcontextlost', handleContextLost, { passive: false });
+    mapCanvas.addEventListener('webglcontextrestored', handleContextRestored);
 
     // Hard-enforce minimum zoom for globe projection
     mapRef.current.on('zoom', () => {
@@ -1861,12 +2171,23 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     window.addEventListener('keydown', handleEscapeToGlobe);
 
-    mapRef.current.on('load', () => {
+    const applyStyleDecorations = () => {
       applyNoGlowAtmosphere();
       add3DBuildingsLayer();
+      ensureMarketCoordinatesLayer(mapRef.current);
+
+      const source = mapRef.current.getSource(MARKET_COORDS_SOURCE_ID);
+      if (source?.setData) {
+        source.setData(marketCoordinatesGeoJSONRef.current);
+      }
+
+      if (!marketCoordinatesLoadedRef.current) {
+        void loadMarketCoordinates();
+      }
 
       // Control label visibility by zoom level
       const layers = mapRef.current.getStyle().layers;
+      if (!Array.isArray(layers)) return;
 
       layers.forEach((layer) => {
         if (layer.type !== 'symbol') return;
@@ -1900,10 +2221,57 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         }
       });
 
-    });
+      mapRef.current.resize();
+      mapRef.current.triggerRepaint();
+    };
+
+    const hideMarketHoverLabel = () => {
+      const label = marketHoverLabelRef.current;
+      if (!label) return;
+      label.style.display = 'none';
+      mapRef.current.getCanvas().style.cursor = '';
+    };
+
+    const handleMarketHoverMove = (event) => {
+      const map = mapRef.current;
+      const label = marketHoverLabelRef.current;
+      if (!map || !label) return;
+
+      const features = map.queryRenderedFeatures(event.point, { layers: [MARKET_COORDS_LAYER_ID] });
+      if (!features.length) {
+        hideMarketHoverLabel();
+        return;
+      }
+
+      const overlapCount = Number(features[0]?.properties?.overlap_count || 1);
+      label.textContent = `${overlapCount} market${overlapCount === 1 ? '' : 's'} here`;
+      label.style.display = 'block';
+      label.style.left = `${event.point.x + 10}px`;
+      label.style.top = `${event.point.y - 26}px`;
+      map.getCanvas().style.cursor = 'pointer';
+    };
+
+    mapRef.current.on('load', applyStyleDecorations);
+    mapRef.current.on('style.load', applyStyleDecorations);
+    mapRef.current.on('mousemove', handleMarketHoverMove);
+    mapRef.current.on('mouseout', hideMarketHoverLabel);
 
     return () => {
       window.removeEventListener('keydown', handleEscapeToGlobe);
+      mapRef.current?.off('load', applyStyleDecorations);
+      mapRef.current?.off('style.load', applyStyleDecorations);
+      mapRef.current?.off('mousemove', handleMarketHoverMove);
+      mapRef.current?.off('mouseout', hideMarketHoverLabel);
+      mapCanvas.removeEventListener('webglcontextlost', handleContextLost);
+      mapCanvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      if (marketHoverLabelRef.current) {
+        marketHoverLabelRef.current.remove();
+        marketHoverLabelRef.current = null;
+      }
+      if (marketCoordinatesAbortRef.current) {
+        marketCoordinatesAbortRef.current.abort();
+        marketCoordinatesAbortRef.current = null;
+      }
       if (suggestionAbortRef.current) suggestionAbortRef.current.abort();
       if (searchAbortRef.current) searchAbortRef.current.abort();
       if (openAnimationTimerRef.current) clearTimeout(openAnimationTimerRef.current);
@@ -1911,7 +2279,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       if (animationId) cancelAnimationFrame(animationId);
       mapRef.current?.remove();
     };
-  }, [returnToBrowseGlobeView, returnToInstructionsView]);
+  }, [ensureMarketCoordinatesLayer, loadMarketCoordinates, returnToBrowseGlobeView, returnToInstructionsView]);
 
   return (
     <div className="map-wrapper">
@@ -1919,7 +2287,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         <button
           className="map-back-button"
           type="button"
-          onClick={returnToInstructionsView}
+          onClick={handleBackButtonClick}
           aria-label="Return to instructions"
         >
           <ArrowLeft className="map-back-button__icon" aria-hidden="true" />
@@ -2054,7 +2422,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
                 <p className="events-modal__question">{event.question || 'Untitled event'}</p>
               </article>
             )) : (
-              <p className="events-modal__empty">No events found for this location.</p>
+              <p className="events-modal__empty">No markets in this area yet.</p>
             )}
           </div>
         </aside>

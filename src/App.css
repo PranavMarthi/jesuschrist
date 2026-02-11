@@ -37,8 +37,27 @@ select {
   height: 100%;
 }
 
-#map canvas {
-  filter: grayscale(0.76) saturate(0.8) contrast(1.1) brightness(1.02);
+.market-hover-count {
+  position: absolute;
+  z-index: 4700;
+  pointer-events: none;
+  padding: 4px 7px;
+  border-radius: 8px;
+  border: 1px solid rgba(222, 235, 255, 0.35);
+  background: rgba(25, 38, 62, 0.84);
+  color: rgba(242, 248, 255, 0.95);
+  font-family: var(--app-font);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  #map canvas {
+    filter: grayscale(0.72) saturate(0.86) contrast(1.2) brightness(1.03);
+  }
 }
 
 .map-search-launcher-stack {
@@ -671,6 +690,16 @@ select {
 }
 
 @media (max-width: 640px) {
+  .map-search-launcher,
+  .map-search-shortcut,
+  .map-back-button,
+  .spotlight__panel,
+  .instructions-modal,
+  .events-modal {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
   .instructions-modal {
     top: 12px;
     left: 12px;

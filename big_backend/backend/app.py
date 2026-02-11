@@ -11,10 +11,11 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 
 ALIAS_MAP: dict[str, list[str]] = {
@@ -36,6 +37,28 @@ ALIAS_MAP: dict[str, list[str]] = {
 logger = logging.getLogger("polyworld.api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+class PlaceCenter(BaseModel):
+    """Coordinate center for selected place."""
+
+    lng: float
+    lat: float
+
+
+class PlaceLookupRequest(BaseModel):
+    """Structured place payload from frontend selection."""
+
+    name: str = Field(default="")
+    place_name: str = Field(default="")
+    place_type: list[str] = Field(default_factory=list)
+    region: str | None = None
+    country: str | None = None
+    center: PlaceCenter | None = None
+    strict_intent: bool = True
+
+
+ScopeType = Literal["poi", "city", "region", "country"]
 
 
 def parse_bool_env(value: str | None, default: bool = False) -> bool:
@@ -128,6 +151,42 @@ def parse_locations(record: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def extract_market_coordinates(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract all valid coordinate points for a market record."""
+    points: list[dict[str, Any]] = []
+    seen: set[tuple[float, float, str]] = set()
+
+    question = str(record.get("question", "")).strip()
+
+    def add_point(lat: Any, lng: Any, location_name: Any) -> None:
+        if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+            return
+        name = str(location_name).strip() if isinstance(location_name, str) else ""
+        key = (round(float(lat), 6), round(float(lng), 6), name)
+        if key in seen:
+            return
+        seen.add(key)
+        points.append(
+            {
+                "question": question,
+                "location_name": name or None,
+                "latitude": key[0],
+                "longitude": key[1],
+            }
+        )
+
+    add_point(record.get("latitude"), record.get("longitude"), record.get("location_name"))
+
+    locations = record.get("locations")
+    if isinstance(locations, list):
+        for item in locations:
+            if not isinstance(item, dict):
+                continue
+            add_point(item.get("latitude"), item.get("longitude"), item.get("location_name"))
+
+    return points
+
+
 @dataclass(slots=True)
 class MatchRef:
     """Reference to a matched record and why it matched."""
@@ -203,6 +262,8 @@ def build_query_variants(query: str) -> list[str]:
 
     variants: set[str] = {normalized}
     parts = [part for part in normalized.split(" ") if part]
+    comma_parts = [normalize_text(part) for part in split_location_parts(query)]
+    comma_parts = [part for part in comma_parts if part]
 
     if len(parts) >= 2:
         variants.add(" ".join(parts))
@@ -210,6 +271,21 @@ def build_query_variants(query: str) -> list[str]:
     for part in parts:
         if len(part) >= 2:
             variants.add(part)
+
+    if comma_parts:
+        variants.add(comma_parts[0])
+        for index in range(1, len(comma_parts)):
+            suffix = " ".join(comma_parts[index:]).strip()
+            if suffix:
+                variants.add(suffix)
+
+    # Add compact n-gram phrases to handle long formatted addresses.
+    max_ngram = min(4, len(parts))
+    for ngram_size in range(2, max_ngram + 1):
+        for start in range(0, len(parts) - ngram_size + 1):
+            phrase = " ".join(parts[start : start + ngram_size]).strip()
+            if phrase:
+                variants.add(phrase)
 
     for token in list(variants):
         for alias in ALIAS_MAP.get(token, []):
@@ -229,6 +305,57 @@ def build_exact_query_variants(query: str) -> list[str]:
         variants.add(alias)
 
     return sorted({variant for variant in variants if variant})
+
+
+def infer_place_scope(place_types: list[str]) -> ScopeType:
+    """Infer strict matching scope from place types."""
+    normalized_types = {normalize_text(t) for t in place_types if isinstance(t, str) and t.strip()}
+
+    if normalized_types.intersection({"poi", "address", "street", "premise", "subpremise"}):
+        return "poi"
+    if normalized_types.intersection({"place", "locality", "neighborhood", "district", "postcode"}):
+        return "city"
+    if "region" in normalized_types:
+        return "region"
+    if "country" in normalized_types:
+        return "country"
+    return "city"
+
+
+def build_place_lookup_variants(place: PlaceLookupRequest, scope: ScopeType) -> list[str]:
+    """Build strict variants for structured place lookup."""
+    seeds: list[str] = []
+
+    raw_name = place.name.strip()
+    raw_place_name = place.place_name.strip()
+
+    if raw_name:
+        seeds.append(raw_name)
+
+    if raw_place_name:
+        place_parts = split_location_parts(raw_place_name)
+        if place_parts:
+            seeds.append(place_parts[0])
+
+        if scope == "country" and place_parts:
+            seeds.append(place_parts[-1])
+
+    if scope == "region" and isinstance(place.region, str) and place.region.strip():
+        seeds.append(place.region.strip())
+
+    if scope == "country" and isinstance(place.country, str) and place.country.strip():
+        seeds.append(place.country.strip())
+
+    if not seeds:
+        return []
+
+    variants: set[str] = set()
+    for seed in seeds:
+        for variant in build_exact_query_variants(seed):
+            if variant:
+                variants.add(variant)
+
+    return sorted(variants)
 
 
 def paginate_rows(rows: list[dict[str, Any]], offset: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -454,7 +581,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=allow_origins,
         allow_credentials=allow_credentials,
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -472,6 +599,17 @@ def create_app() -> FastAPI:
             "records": len(records),
             "indexed_tokens": len(index.token_index),
             "data_source": source_file,
+        }
+
+    @app.get("/api/v1/markets/coordinates")
+    def market_coordinates() -> dict[str, Any]:
+        coordinates: list[dict[str, Any]] = []
+        for record in records:
+            coordinates.extend(extract_market_coordinates(record))
+
+        return {
+            "count": len(coordinates),
+            "coordinates": coordinates,
         }
 
     @app.get("/markets")
@@ -514,7 +652,7 @@ def create_app() -> FastAPI:
         location: str = Query(..., min_length=1, max_length=200, description="Location string (city/state/country/place)"),
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
-        strict: bool = Query(True, description="If true, use exact matching only"),
+        strict: bool = Query(True, description="Exact matching only; fallback is disabled"),
     ) -> dict[str, Any]:
         raw = location.strip()
         if not raw:
@@ -528,18 +666,11 @@ def create_app() -> FastAPI:
         used_variants = exact_variants
         all_results = exact_results
 
-        if not strict and not exact_results:
-            fallback_variants = build_query_variants(raw)
-            fallback_groups = [index.search(variant) for variant in fallback_variants]
-            all_results = merge_result_groups(fallback_groups)
-            used_variants = fallback_variants
-            mode = "fallback"
-
         paged_results, has_more = paginate_rows(all_results, offset=offset, limit=limit)
         logger.info(
             "events lookup location=%s strict=%s mode=%s count=%s offset=%s limit=%s",
             raw,
-            strict,
+            True,
             mode,
             len(all_results),
             offset,
@@ -554,13 +685,45 @@ def create_app() -> FastAPI:
             "location": raw,
             "normalized_location": normalize_text(raw),
             "mode": mode,
-            "strict": strict,
+            "strict": True,
             "used_variants": used_variants,
             "count": len(all_results),
             "limit": limit,
             "offset": offset,
             "has_more": has_more,
             "results": paged_results,
+        }
+
+    @app.post("/api/v1/events/by-place")
+    def events_by_place(place: PlaceLookupRequest) -> dict[str, Any]:
+        display_name = place.place_name.strip() or place.name.strip()
+        if not display_name:
+            raise HTTPException(status_code=400, detail="place.name or place.place_name is required")
+
+        scope = infer_place_scope(place.place_type)
+        variants = build_place_lookup_variants(place, scope)
+        groups = [index.search(variant) for variant in variants]
+        results = merge_result_groups(groups)
+
+        logger.info(
+            "events by-place scope=%s name=%s variants=%s count=%s",
+            scope,
+            display_name,
+            variants,
+            len(results),
+        )
+        for row in results:
+            question = str(row.get("question", "")).strip()
+            if question:
+                logger.info("matched event: %s", question)
+
+        return {
+            "place_name": display_name,
+            "matched_scope": scope,
+            "strict_intent": True,
+            "used_variants": variants,
+            "count": len(results),
+            "results": results,
         }
 
     return app
