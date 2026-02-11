@@ -4,7 +4,7 @@ import { ArrowLeft } from 'lucide-react';
 
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-mapboxgl.accessToken = 'pk.eyJ1IjoicG1hcnRoaSIsImEiOiJjbWxjbm1qYXQxMWRlM2Zwb2J1YThhODcwIn0.pWp7Uy5gzAy7I_0r7HAujQ';
+mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
 mapboxgl.prewarm();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const POLYWORLD_API_BASE_URL = (import.meta.env.VITE_POLYWORLD_API_URL || 'http://localhost:8000').replace(/\/$/, '');
