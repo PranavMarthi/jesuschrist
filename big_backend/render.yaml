@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: polyworld-api
+    runtime: python
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "cd backend && pip install -r requirements.txt"
+    startCommand: "cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: POLYWORLD_RESULTS_FILE
+        value: ../polymarket_all_results.json
+      - key: POLYWORLD_CACHE_FILE
+        value: ../.geolocate_cache.json
+      - key: POLYWORLD_CORS_ORIGINS
+        value: https://jesuschrist-ruddy.vercel.app,https://jesuschrist-ruddy.vercel.app/
+      - key: PYTHON_VERSION
+        value: 3.11.0
