@@ -11,6 +11,7 @@ const POLYWORLD_API_BASE_URL = (import.meta.env.VITE_POLYWORLD_API_URL || 'http:
 const BASE_MAP_STYLE = 'mapbox://styles/mapbox/streets-v12';
 const MARKET_COORDS_SOURCE_ID = 'market-coordinates-source';
 const MARKET_COORDS_LAYER_ID = 'market-coordinates-layer';
+const HIGHLIGHT_BUILDING_LAYER_ID = 'highlighted-building-layer';
 
 const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => {
   const mapContainerRef = useRef();
@@ -36,6 +37,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const marketCoordinatesLoadedRef = useRef(false);
   const marketCoordinatesAbortRef = useRef(null);
   const marketHoverLabelRef = useRef(null);
+  const highlightedBuildingRef = useRef(null);
   const initialViewRef = useRef({
     center: [-100.486052, 30],
     zoom: 1.94,
@@ -653,7 +655,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     const map = mapRef.current;
     if (!map) return;
     setViewModeState('focused');
-    const { prefer3D = false } = options;
+    const { prefer3D = false, highlightBuilding = false } = options;
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
 
@@ -662,6 +664,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     map.setPadding({ top: 0, right: 0, bottom: 0, left: 0 });
 
     spinEnabledRef.current = false;
+
+    // Clear any existing building highlight
+    clearBuildingHighlight();
 
     const targetPitch = prefer3D ? camera.pitch : 0;
     const targetBearing = prefer3D ? camera.bearing : 0;
@@ -715,6 +720,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
           if (!hasRendered3D && map.getPitch() > 0) {
             map.easeTo({ pitch: 0, bearing: 0, duration: 450, essential: true });
+          } else if (hasRendered3D && highlightBuilding) {
+            // Highlight the building after render is complete
+            highlightBuildingAtLocation(center);
           }
         });
       }
@@ -971,6 +979,114 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     return true;
   };
 
+  const highlightBuildingAtLocation = useCallback((center, radius = 100) => {
+    const map = mapRef.current;
+    if (!map || !center) return;
+
+    // Store the highlighted location
+    highlightedBuildingRef.current = { center, radius };
+
+    // Ensure 3D buildings layer exists
+    add3DBuildingsLayer();
+
+    // Remove existing highlight layer if it exists
+    if (map.getLayer(HIGHLIGHT_BUILDING_LAYER_ID)) {
+      map.removeLayer(HIGHLIGHT_BUILDING_LAYER_ID);
+    }
+
+    // Query buildings near the center point
+    const point = map.project(center);
+    const bbox = [
+      [point.x - 50, point.y - 50],
+      [point.x + 50, point.y + 50]
+    ];
+
+    const features = map.queryRenderedFeatures(bbox, {
+      layers: ['3d-buildings']
+    });
+
+    if (features.length === 0) return;
+
+    // Find the closest building to the exact center point
+    let closestFeature = features[0];
+    let minDistance = Infinity;
+
+    features.forEach(feature => {
+      if (!feature.geometry || feature.geometry.type !== 'Polygon') return;
+      
+      const coords = feature.geometry.coordinates[0];
+      if (!coords || coords.length === 0) return;
+
+      // Calculate centroid of the building polygon
+      let sumLng = 0, sumLat = 0;
+      coords.forEach(coord => {
+        sumLng += coord[0];
+        sumLat += coord[1];
+      });
+      const centroidLng = sumLng / coords.length;
+      const centroidLat = sumLat / coords.length;
+
+      // Calculate distance from search center
+      const dx = centroidLng - center[0];
+      const dy = centroidLat - center[1];
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestFeature = feature;
+      }
+    });
+
+    // Add highlighted building layer
+    map.addLayer(
+      {
+        id: HIGHLIGHT_BUILDING_LAYER_ID,
+        source: 'composite',
+        'source-layer': 'building',
+        filter: [
+          'all',
+          ['==', ['get', 'extrude'], 'true'],
+          ['==', ['id'], closestFeature.id]
+        ],
+        type: 'fill-extrusion',
+        minzoom: 14,
+        paint: {
+          'fill-extrusion-color': '#ff1200',
+          'fill-extrusion-height': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            14,
+            0,
+            14.5,
+            ['coalesce', ['get', 'height'], 0]
+          ],
+          'fill-extrusion-base': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            14,
+            0,
+            14.5,
+            ['coalesce', ['get', 'min_height'], 0]
+          ],
+          'fill-extrusion-opacity': 1
+        }
+      }
+    );
+  }, []);
+
+  const clearBuildingHighlight = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    highlightedBuildingRef.current = null;
+
+    if (map.getLayer(HIGHLIGHT_BUILDING_LAYER_ID)) {
+      map.removeLayer(HIGHLIGHT_BUILDING_LAYER_ID);
+    }
+  }, []);
+
   const getCameraForFeature = (feature) => {
     const placeTypes = feature.place_type || [];
 
@@ -1015,12 +1131,18 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       placeTypes.includes('district') ||
       placeTypes.includes('neighborhood') ||
       placeTypes.includes('postcode');
+    
+    // Highlight building for POIs and addresses (specific buildings)
+    const shouldHighlight = placeTypes.includes('poi') || placeTypes.includes('address');
 
     spinEnabledRef.current = false;
 
     if (!isSmallArea3D && Array.isArray(feature.bbox) && feature.bbox.length === 4) {
       const [minLng, minLat, maxLng, maxLat] = feature.bbox;
       const bboxCenter = [(minLng + maxLng) / 2, (minLat + maxLat) / 2];
+
+      // Clear any existing building highlight for bbox views
+      clearBuildingHighlight();
 
       const runFinalBounds = () => {
         if (cameraTransitionRef.current !== transitionId) return;
@@ -1084,7 +1206,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       return;
     }
 
-    flyToLocation(feature.center, camera, { prefer3D: isSmallArea3D });
+    flyToLocation(feature.center, camera, { prefer3D: isSmallArea3D, highlightBuilding: shouldHighlight });
   };
 
   const mapGoogleTypesToPlaceType = (types) => {
@@ -1826,6 +1948,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     map.stop();
 
+    // Clear building highlight when returning to globe view
+    clearBuildingHighlight();
+
     setSearchError('');
     setQuery('');
     setDynamicSuggestions([]);
@@ -1865,7 +1990,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setViewModeState('instructions');
 
     if (onReturnToInstructions) onReturnToInstructions();
-  }, [isMobileDevice, onReturnToInstructions, setViewModeState]);
+  }, [isMobileDevice, onReturnToInstructions, setViewModeState, clearBuildingHighlight]);
 
   const returnToBrowseGlobeView = useCallback(() => {
     if (isMobileDevice()) {
@@ -1877,6 +2002,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     if (!map) return;
 
     map.stop();
+
+    // Clear building highlight when returning to globe view
+    clearBuildingHighlight();
 
     setSearchError('');
     setQuery('');
