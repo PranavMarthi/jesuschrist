@@ -27,6 +27,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const spinEnabledRef = useRef(true);
   const userInteractingRef = useRef(false);
   const viewModeRef = useRef('instructions');
+  const eventsModalOpenRef = useRef(false);
   const initialViewRef = useRef({
     center: [-100.486052, 30],
     zoom: 1.94,
@@ -46,8 +47,18 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const [activeLocationIndex, setActiveLocationIndex] = useState(0);
   const [manualSelection, setManualSelection] = useState(false);
   const [dynamicSuggestions, setDynamicSuggestions] = useState([]);
+  const [launcherTypedCity, setLauncherTypedCity] = useState('');
+  const [viewMode, setViewMode] = useState('instructions');
+  const [associatedEvents, setAssociatedEvents] = useState([]);
+  const [eventsModalLocation, setEventsModalLocation] = useState('');
+  const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const lastEventsLookupRef = useRef('');
   const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+  const setViewModeState = useCallback((mode) => {
+    viewModeRef.current = mode;
+    setViewMode(mode);
+  }, []);
 
   const quickLocations = useMemo(
     () => [
@@ -375,6 +386,55 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     );
   }, [query, quickLocations]);
 
+  useEffect(() => {
+    const cities = quickLocations.map((location) => location.name).filter(Boolean);
+    if (!cities.length) return;
+
+    let timeoutId;
+    let cityIndex = 0;
+    let charIndex = 0;
+    let deleting = false;
+    let cancelled = false;
+
+    const tick = () => {
+      if (cancelled) return;
+
+      const city = cities[cityIndex] || '';
+
+      if (!deleting) {
+        if (charIndex < city.length) {
+          charIndex += 1;
+          setLauncherTypedCity(city.slice(0, charIndex));
+          timeoutId = setTimeout(tick, 82);
+          return;
+        }
+
+        deleting = true;
+        timeoutId = setTimeout(tick, 980);
+        return;
+      }
+
+      if (charIndex > 0) {
+        charIndex -= 1;
+        setLauncherTypedCity(city.slice(0, charIndex));
+        timeoutId = setTimeout(tick, 44);
+        return;
+      }
+
+      deleting = false;
+      cityIndex = (cityIndex + 1) % cities.length;
+      timeoutId = setTimeout(tick, 260);
+    };
+
+    setLauncherTypedCity('');
+    timeoutId = setTimeout(tick, 420);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [quickLocations]);
+
   const normalizeText = (value) => value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
   const matchingLandmarks = useMemo(() => {
@@ -445,7 +505,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const flyToLocation = (center, camera, options = {}) => {
     const map = mapRef.current;
     if (!map) return;
-    viewModeRef.current = 'focused';
+    setViewModeState('focused');
     const { prefer3D = false } = options;
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
@@ -530,8 +590,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
   const fetchAssociatedEvents = useCallback(async (locationQuery) => {
     const normalized = typeof locationQuery === 'string' ? locationQuery.trim() : '';
-    if (!normalized || normalized === lastEventsLookupRef.current) return;
-    lastEventsLookupRef.current = normalized;
+    const lookupKey = normalized.toLowerCase();
+    if (!normalized || lookupKey === lastEventsLookupRef.current) return;
+    lastEventsLookupRef.current = lookupKey;
 
     try {
       const pageSize = 1000;
@@ -568,28 +629,57 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         mode,
         results: allResults
       });
+
+      setEventsModalLocation(normalized);
+      setAssociatedEvents(allResults);
+      setIsEventsModalOpen(true);
     } catch (error) {
       console.error('[Polyworld events] lookup failed', normalized, error);
     }
   }, []);
 
+  const getLookupQueryFromResult = (result) => {
+    if (!result) return '';
+
+    if (result.kind === 'quick') {
+      return result.location.subtitle || result.location.name || '';
+    }
+
+    if (result.kind === 'landmark') {
+      return result.landmark.subtitle || result.landmark.name || '';
+    }
+
+    if (result.kind === 'dynamic') {
+      return result.suggestion.subtitle || result.suggestion.name || '';
+    }
+
+    return '';
+  };
+
+  const getLookupQueryFromFeature = (feature, fallback = '') => {
+    if (!feature || typeof feature !== 'object') return fallback;
+    const placeName = typeof feature.place_name === 'string' ? feature.place_name.trim() : '';
+    const text = typeof feature.text === 'string' ? feature.text.trim() : '';
+    return placeName || text || fallback;
+  };
+
   const selectResult = async (result) => {
     if (!result) return;
 
     if (result.kind === 'landmark') {
-      void fetchAssociatedEvents(result.landmark.name);
+      void fetchAssociatedEvents(getLookupQueryFromResult(result));
       flyToFeature(result.landmark.feature);
       return;
     }
 
     if (result.kind === 'quick') {
-      void fetchAssociatedEvents(result.location.name);
+      void fetchAssociatedEvents(getLookupQueryFromResult(result));
       flyToLocation(result.location.center, result.location.camera);
       return;
     }
 
     if (result.kind === 'dynamic') {
-      void fetchAssociatedEvents(result.suggestion.name || result.suggestion.subtitle);
+      void fetchAssociatedEvents(getLookupQueryFromResult(result));
       if (result.suggestion.feature) {
         flyToFeature(result.suggestion.feature);
         return;
@@ -703,7 +793,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const flyToFeature = (feature) => {
     const map = mapRef.current;
     if (!map || !feature?.center) return;
-    viewModeRef.current = 'focused';
+    setViewModeState('focused');
 
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
@@ -1238,7 +1328,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     if (!trimmedQuery) {
       const quickLocation = filteredLocations[activeLocationIndex] || quickLocations[0];
       if (quickLocation) {
-        void fetchAssociatedEvents(quickLocation.name);
+        void fetchAssociatedEvents(quickLocation.subtitle || quickLocation.name);
         flyToLocation(quickLocation.center, quickLocation.camera);
       }
       return;
@@ -1249,7 +1339,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     );
 
     if (exactQuickLocation) {
-      void fetchAssociatedEvents(exactQuickLocation.name);
+      void fetchAssociatedEvents(exactQuickLocation.subtitle || exactQuickLocation.name);
       flyToLocation(exactQuickLocation.center, exactQuickLocation.camera);
       return;
     }
@@ -1342,7 +1432,17 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       }
 
       searchCacheRef.current.set(cacheKey, { feature, timestamp: Date.now() });
-      void fetchAssociatedEvents(trimmedQuery);
+
+      const activeLookupQuery = getLookupQueryFromResult(activeResult);
+      const resolvedLookupQuery = getLookupQueryFromFeature(feature, trimmedQuery);
+      const backendLookupQuery = activeLookupQuery || resolvedLookupQuery || trimmedQuery;
+
+      console.log('[Polyworld events] lookup source', {
+        typed_query: trimmedQuery,
+        resolved_lookup_query: backendLookupQuery
+      });
+
+      void fetchAssociatedEvents(backendLookupQuery);
       flyToFeature(feature);
     } catch (error) {
       if (error.name === 'AbortError') return;
@@ -1377,6 +1477,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setActiveLocationIndex(0);
     setManualSelection(false);
     setIsSearchOpen(false);
+    setIsEventsModalOpen(false);
+    setAssociatedEvents([]);
+    setEventsModalLocation('');
+    lastEventsLookupRef.current = '';
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
     spinEnabledRef.current = false;
@@ -1401,10 +1505,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       spinEnabledRef.current = true;
     });
 
-    viewModeRef.current = 'instructions';
+    setViewModeState('instructions');
 
     if (onReturnToInstructions) onReturnToInstructions();
-  }, [onReturnToInstructions]);
+  }, [onReturnToInstructions, setViewModeState]);
 
   const returnToBrowseGlobeView = useCallback(() => {
     const map = mapRef.current;
@@ -1418,6 +1522,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setActiveLocationIndex(0);
     setManualSelection(false);
     setIsSearchOpen(false);
+    setIsEventsModalOpen(false);
+    setAssociatedEvents([]);
+    setEventsModalLocation('');
+    lastEventsLookupRef.current = '';
 
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
@@ -1444,8 +1552,8 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       spinEnabledRef.current = true;
     });
 
-    viewModeRef.current = 'browse';
-  }, []);
+    setViewModeState('browse');
+  }, [setViewModeState]);
 
   const handleSpotlightKeyDown = (event) => {
     if (!displayResults.length) return;
@@ -1484,6 +1592,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       searchboxSessionTokenRef.current = '';
     }
   }, [isSearchOpen]);
+
+  useEffect(() => {
+    eventsModalOpenRef.current = isEventsModalOpen;
+  }, [isEventsModalOpen]);
 
   useEffect(() => {
     if (!isSearchOpen || !renderSearch) return;
@@ -1541,9 +1653,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   useEffect(() => {
     if (onboardingPhase === 'visible') {
       hasCompletedOnboardingRef.current = false;
-      viewModeRef.current = 'instructions';
+      setViewModeState('instructions');
     }
-  }, [onboardingPhase]);
+  }, [onboardingPhase, setViewModeState]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1568,7 +1680,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     const onMoveEnd = () => {
       map.setPadding(centeredGlobePaddingRef.current);
-      viewModeRef.current = 'browse';
+      setViewModeState('browse');
     };
 
     map.once('moveend', onMoveEnd);
@@ -1576,7 +1688,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     return () => {
       map.off('moveend', onMoveEnd);
     };
-  }, [onboardingPhase]);
+  }, [onboardingPhase, setViewModeState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1730,6 +1842,15 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         return;
       }
 
+      if (eventsModalOpenRef.current) {
+        setIsEventsModalOpen(false);
+        setAssociatedEvents([]);
+        setEventsModalLocation('');
+        lastEventsLookupRef.current = '';
+        returnToBrowseGlobeView();
+        return;
+      }
+
       if (viewModeRef.current === 'browse') {
         returnToInstructionsView();
         return;
@@ -1808,7 +1929,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       {onboardingPhase === 'done' && !renderSearch ? (
         <div className="map-search-launcher-stack">
           <button className="map-search-launcher" type="button" onClick={handleSearchLauncherClick} aria-label="Open search">
-            <span className="map-search-launcher__text">Search</span>
+            <span className="map-search-launcher__text">
+              Search "<span className="map-search-launcher__typed">{launcherTypedCity}</span>"
+              <span className="map-search-launcher__caret" aria-hidden="true" />
+            </span>
             <span className="map-search-launcher__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="11" cy="11" r="7" />
@@ -1827,7 +1951,15 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         </div>
       ) : null}
       {renderSearch ? (
-        <div className={`spotlight ${searchAnimatedIn ? 'is-visible' : 'is-hidden'}`}>
+        <div
+          className={`spotlight ${searchAnimatedIn ? 'is-visible' : 'is-hidden'}`}
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            setSearchError('');
+            setIsSearchOpen(false);
+            setDynamicSuggestions([]);
+          }}
+        >
           <form className="spotlight__panel" onSubmit={searchLocation} onKeyDown={handleSpotlightKeyDown}>
             <div className="spotlight__top">
               <span className="spotlight__icon" aria-hidden="true">
@@ -1905,6 +2037,29 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
           </form>
         </div>
       ) : null}
+
+      {onboardingPhase === 'done' && !renderSearch && viewMode === 'focused' && isEventsModalOpen ? (
+        <aside className="events-modal" aria-label="Events for selected location">
+          <div className="events-modal__header">
+            <p className="events-modal__eyebrow">Related Events</p>
+            <h3 className="events-modal__title">{eventsModalLocation}</h3>
+          </div>
+
+          <div className="events-modal__list">
+            {associatedEvents.length ? associatedEvents.map((event, index) => (
+              <article
+                key={`${event.question || 'event'}-${event.slug || event.market_slug || index}`}
+                className="events-modal__tile"
+              >
+                <p className="events-modal__question">{event.question || 'Untitled event'}</p>
+              </article>
+            )) : (
+              <p className="events-modal__empty">No events found for this location.</p>
+            )}
+          </div>
+        </aside>
+      ) : null}
+
       <div id="map" ref={mapContainerRef} style={{ height: '100%' }} />
     </div>
   );
