@@ -7,6 +7,7 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 mapboxgl.accessToken = 'pk.eyJ1IjoicG1hcnRoaSIsImEiOiJjbWxjbm1qYXQxMWRlM2Zwb2J1YThhODcwIn0.pWp7Uy5gzAy7I_0r7HAujQ';
 mapboxgl.prewarm();
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const POLYWORLD_API_BASE_URL = (import.meta.env.VITE_POLYWORLD_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
 const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => {
   const mapContainerRef = useRef();
@@ -45,6 +46,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const [activeLocationIndex, setActiveLocationIndex] = useState(0);
   const [manualSelection, setManualSelection] = useState(false);
   const [dynamicSuggestions, setDynamicSuggestions] = useState([]);
+  const lastEventsLookupRef = useRef('');
   const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
   const quickLocations = useMemo(
@@ -526,20 +528,68 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setIsSearchOpen(false);
   };
 
+  const fetchAssociatedEvents = useCallback(async (locationQuery) => {
+    const normalized = typeof locationQuery === 'string' ? locationQuery.trim() : '';
+    if (!normalized || normalized === lastEventsLookupRef.current) return;
+    lastEventsLookupRef.current = normalized;
+
+    try {
+      const pageSize = 1000;
+      let offset = 0;
+      let hasMore = true;
+      let totalCount = 0;
+      let mode = 'exact';
+      const allResults = [];
+
+      while (hasMore) {
+        const params = new URLSearchParams({
+          location: normalized,
+          strict: 'false',
+          limit: String(pageSize),
+          offset: String(offset)
+        });
+
+        const response = await fetch(`${POLYWORLD_API_BASE_URL}/api/v1/events/by-location?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        totalCount = payload.count;
+        mode = payload.mode;
+        allResults.push(...(Array.isArray(payload.results) ? payload.results : []));
+        hasMore = Boolean(payload.has_more);
+        offset += pageSize;
+      }
+
+      console.log('[Polyworld events]', {
+        location: normalized,
+        count: totalCount,
+        mode,
+        results: allResults
+      });
+    } catch (error) {
+      console.error('[Polyworld events] lookup failed', normalized, error);
+    }
+  }, []);
+
   const selectResult = async (result) => {
     if (!result) return;
 
     if (result.kind === 'landmark') {
+      void fetchAssociatedEvents(result.landmark.name);
       flyToFeature(result.landmark.feature);
       return;
     }
 
     if (result.kind === 'quick') {
+      void fetchAssociatedEvents(result.location.name);
       flyToLocation(result.location.center, result.location.camera);
       return;
     }
 
     if (result.kind === 'dynamic') {
+      void fetchAssociatedEvents(result.suggestion.name || result.suggestion.subtitle);
       if (result.suggestion.feature) {
         flyToFeature(result.suggestion.feature);
         return;
@@ -1188,6 +1238,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     if (!trimmedQuery) {
       const quickLocation = filteredLocations[activeLocationIndex] || quickLocations[0];
       if (quickLocation) {
+        void fetchAssociatedEvents(quickLocation.name);
         flyToLocation(quickLocation.center, quickLocation.camera);
       }
       return;
@@ -1198,6 +1249,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     );
 
     if (exactQuickLocation) {
+      void fetchAssociatedEvents(exactQuickLocation.name);
       flyToLocation(exactQuickLocation.center, exactQuickLocation.camera);
       return;
     }
@@ -1290,6 +1342,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       }
 
       searchCacheRef.current.set(cacheKey, { feature, timestamp: Date.now() });
+      void fetchAssociatedEvents(trimmedQuery);
       flyToFeature(feature);
     } catch (error) {
       if (error.name === 'AbortError') return;
