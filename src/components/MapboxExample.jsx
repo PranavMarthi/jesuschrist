@@ -4,8 +4,14 @@ import { ArrowLeft } from 'lucide-react';
 
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
-mapboxgl.prewarm();
+const mapboxToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+if (!mapboxToken) {
+  console.error('VITE_MAPBOX_ACCESS_TOKEN is not defined! Map will not render.');
+}
+mapboxgl.accessToken = mapboxToken || '';
+if (mapboxToken) {
+  mapboxgl.prewarm();
+}
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const POLYWORLD_API_BASE_URL = (import.meta.env.VITE_POLYWORLD_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 const BASE_MAP_STYLE = 'mapbox://styles/mapbox/streets-v12';
