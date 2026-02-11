@@ -29,13 +29,13 @@ function InstructionsModal({ phase, onClose }) {
         <div height="1px" />
         <div />
 
-        <p className="instructions-modal__subtitle">
+        <p className="instructions-modal__subtitle instructions-modal__subtitle--mono">
           Your Predictions, in Real Life.
         </p>
 
 
         <div />
-        <p className="instructions-modal__subtitle">
+        <p className="instructions-modal__subtitle instructions-modal__subtitle--mono">
           Polyworld allows you to see where prediction markets are happening in the real world. Geopolitics, sports, culture, finance, and more.
         </p>
 
@@ -46,7 +46,6 @@ function InstructionsModal({ phase, onClose }) {
       </div>
 
 
-      <div />
       <div />
 
       <button className="instructions-modal__close" type="button" onClick={onClose}>

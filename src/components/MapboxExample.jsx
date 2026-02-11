@@ -754,6 +754,19 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     return ['place'];
   };
 
+  const applyNoGlowAtmosphere = () => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    map.setFog({
+      color: 'rgba(42, 58, 92, 0.9)',
+      'high-color': 'rgba(64, 84, 128, 0.84)',
+      'space-color': 'rgba(34, 52, 88, 1)',
+      'horizon-blend': 0.14,
+      'star-intensity': 0.2
+    });
+  };
+
   const googleViewportToBbox = (viewport) => {
     if (!viewport) return undefined;
 
@@ -1317,6 +1330,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     userInteractingRef.current = false;
 
     map.setProjection('globe');
+    applyNoGlowAtmosphere();
 
     map.flyTo({
       center: initialViewRef.current.center,
@@ -1359,6 +1373,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     userInteractingRef.current = false;
 
     map.setProjection('globe');
+    applyNoGlowAtmosphere();
 
     map.flyTo({
       center: initialViewRef.current.center,
@@ -1486,6 +1501,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     hasCompletedOnboardingRef.current = true;
     const finalZoom = 2.14;
     map.setProjection('globe');
+    applyNoGlowAtmosphere();
 
     map.easeTo({
       padding: centeredGlobePaddingRef.current,
@@ -1672,6 +1688,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     window.addEventListener('keydown', handleEscapeToGlobe);
 
     mapRef.current.on('load', () => {
+      applyNoGlowAtmosphere();
       add3DBuildingsLayer();
 
       // Control label visibility by zoom level
