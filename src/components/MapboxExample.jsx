@@ -2525,13 +2525,29 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     const handleMarketClick = (event) => {
       const map = mapRef.current;
-      if (!map) return;
+      const label = marketHoverLabelRef.current;
+      if (!map || !label) return;
 
       const features = map.queryRenderedFeatures(event.point, { layers: [MARKET_COORDS_LAYER_ID] });
-      if (!features.length) return;
+      if (!features.length) {
+        hideMarketHoverLabel();
+        return;
+      }
+
+      // Show market count label on click (for mobile/touch devices)
+      const overlapCount = Number(features[0]?.properties?.overlap_count || 1);
+      label.textContent = `${overlapCount} market${overlapCount === 1 ? '' : 's'} here`;
+      label.style.display = 'block';
+      label.style.left = `${event.point.x + 10}px`;
+      label.style.top = `${event.point.y - 26}px`;
 
       // Pause spinning for 5 seconds when clicking a market dot
       pauseSpinningForDuration(5000);
+
+      // Hide label after 3 seconds
+      setTimeout(() => {
+        hideMarketHoverLabel();
+      }, 3000);
     };
 
     mapRef.current.on('load', applyStyleDecorations);
