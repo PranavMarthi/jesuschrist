@@ -191,6 +191,36 @@ select {
   background: rgba(52, 87, 136, 0.4);
 }
 
+.map-spin-paused-badge {
+  height: 26px;
+  min-width: 120px;
+  border: 1px solid rgba(255, 200, 120, 0.7);
+  border-radius: 999px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(80, 60, 30, 0.4);
+  backdrop-filter: blur(10px) saturate(130%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
+  color: rgba(255, 235, 200, 0.96);
+  font: 600 11px/1 var(--app-font);
+  letter-spacing: 0.04em;
+  box-shadow: 0 8px 18px rgba(5, 13, 28, 0.2), inset 0 1px 0 rgba(255, 220, 160, 0.22);
+  animation: pauseBadgeFadeIn 280ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes pauseBadgeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .events-modal {
   position: fixed;
   top: clamp(148px, 18vh, 220px);
@@ -764,6 +794,12 @@ select {
   .map-search-shortcut {
     height: 24px;
     min-width: 52px;
+    font-size: 10px;
+  }
+
+  .map-spin-paused-badge {
+    height: 24px;
+    min-width: 100px;
     font-size: 10px;
   }
 }

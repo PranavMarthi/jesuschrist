@@ -36,6 +36,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const cameraTransitionRef = useRef(0);
   const spinEnabledRef = useRef(true);
   const userInteractingRef = useRef(false);
+  const spinPauseTimerRef = useRef(null);
   const isRepairingMobileRef = useRef(false);
   const viewModeRef = useRef('instructions');
   const eventsModalOpenRef = useRef(false);
@@ -68,6 +69,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const [associatedEvents, setAssociatedEvents] = useState([]);
   const [eventsModalLocation, setEventsModalLocation] = useState('');
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
+  const [isSpinPaused, setIsSpinPaused] = useState(false);
   const lastEventsLookupRef = useRef('');
   const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
@@ -79,6 +81,25 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const isMobileDevice = useCallback(() => {
     if (typeof window === 'undefined') return false;
     return window.matchMedia('(hover: none), (pointer: coarse)').matches;
+  }, []);
+
+  const pauseSpinningForDuration = useCallback((durationMs = 5000) => {
+    // Clear any existing pause timer
+    if (spinPauseTimerRef.current) {
+      clearTimeout(spinPauseTimerRef.current);
+      spinPauseTimerRef.current = null;
+    }
+
+    // Pause spinning
+    spinEnabledRef.current = false;
+    setIsSpinPaused(true);
+
+    // Resume after duration
+    spinPauseTimerRef.current = setTimeout(() => {
+      spinEnabledRef.current = true;
+      setIsSpinPaused(false);
+      spinPauseTimerRef.current = null;
+    }, durationMs);
   }, []);
 
   const repairMobileGlobeIfBlank = useCallback(() => {
@@ -2359,7 +2380,11 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
     // Pause rotation on user interaction
     mapRef.current.on('mousedown', () => { userInteractingRef.current = true; });
-    mapRef.current.on('dragstart', () => { userInteractingRef.current = true; });
+    mapRef.current.on('dragstart', () => { 
+      userInteractingRef.current = true;
+      // Reset pause timer when user drags
+      pauseSpinningForDuration(5000);
+    });
     mapRef.current.on('mouseup', () => { userInteractingRef.current = false; });
     mapRef.current.on('dragend', () => { userInteractingRef.current = false; });
     mapRef.current.on('touchstart', () => { userInteractingRef.current = true; });
@@ -2498,10 +2523,22 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       map.getCanvas().style.cursor = 'pointer';
     };
 
+    const handleMarketClick = (event) => {
+      const map = mapRef.current;
+      if (!map) return;
+
+      const features = map.queryRenderedFeatures(event.point, { layers: [MARKET_COORDS_LAYER_ID] });
+      if (!features.length) return;
+
+      // Pause spinning for 5 seconds when clicking a market dot
+      pauseSpinningForDuration(5000);
+    };
+
     mapRef.current.on('load', applyStyleDecorations);
     mapRef.current.on('style.load', applyStyleDecorations);
     mapRef.current.on('mousemove', handleMarketHoverMove);
     mapRef.current.on('mouseout', hideMarketHoverLabel);
+    mapRef.current.on('click', handleMarketClick);
 
     return () => {
       window.removeEventListener('keydown', handleEscapeToGlobe);
@@ -2509,6 +2546,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       mapRef.current?.off('style.load', applyStyleDecorations);
       mapRef.current?.off('mousemove', handleMarketHoverMove);
       mapRef.current?.off('mouseout', hideMarketHoverLabel);
+      mapRef.current?.off('click', handleMarketClick);
       mapCanvas.removeEventListener('webglcontextlost', handleContextLost);
       mapCanvas.removeEventListener('webglcontextrestored', handleContextRestored);
       if (marketHoverLabelRef.current) {
@@ -2523,10 +2561,11 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       if (searchAbortRef.current) searchAbortRef.current.abort();
       if (openAnimationTimerRef.current) clearTimeout(openAnimationTimerRef.current);
       if (closeAnimationTimerRef.current) clearTimeout(closeAnimationTimerRef.current);
+      if (spinPauseTimerRef.current) clearTimeout(spinPauseTimerRef.current);
       if (animationId) cancelAnimationFrame(animationId);
       mapRef.current?.remove();
     };
-  }, [ensureMarketCoordinatesLayer, loadMarketCoordinates, returnToBrowseGlobeView, returnToInstructionsView]);
+  }, [ensureMarketCoordinatesLayer, loadMarketCoordinates, returnToBrowseGlobeView, returnToInstructionsView, pauseSpinningForDuration]);
 
   return (
     <div className="map-wrapper">
@@ -2563,6 +2602,11 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
           >
             ⌘K
           </button>
+          {isSpinPaused ? (
+            <div className="map-spin-paused-badge" aria-live="polite">
+              Rotation Paused
+            </div>
+          ) : null}
         </div>
       ) : null}
       {renderSearch ? (
