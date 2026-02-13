@@ -98,7 +98,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions, onDis
 
     // Resume after duration
     spinPauseTimerRef.current = setTimeout(() => {
-      spinEnabledRef.current = true;
+      // Stay paused while focused on a selected location
+      if (viewModeRef.current !== 'focused') {
+        spinEnabledRef.current = true;
+      }
       setIsSpinPaused(false);
       spinPauseTimerRef.current = null;
     }, durationMs);
@@ -933,25 +936,31 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions, onDis
     const question = String(feature?.properties?.question || '').trim();
     const placeName = locationName || question || 'Selected market';
 
+    const runSelectionFlow = () => {
+      setHighlightedEventQuestion(question);
+
+      flyToLocation(
+        [lng, lat],
+        { zoom: 9.8, pitch: 0, bearing: 0 },
+        { prefer3D: false, highlightBuilding: false }
+      );
+
+      void fetchAssociatedEvents({
+        name: placeName,
+        place_name: placeName,
+        place_type: ['poi'],
+        center: { lng, lat },
+        strict_intent: true
+      });
+    };
+
     if (typeof onDismissOnboarding === 'function' && onboardingPhase !== 'done') {
       onDismissOnboarding();
+      requestAnimationFrame(runSelectionFlow);
+      return;
     }
 
-    setHighlightedEventQuestion(question);
-
-    flyToLocation(
-      [lng, lat],
-      { zoom: 9.8, pitch: 0, bearing: 0 },
-      { prefer3D: false, highlightBuilding: false }
-    );
-
-    void fetchAssociatedEvents({
-      name: placeName,
-      place_name: placeName,
-      place_type: ['poi'],
-      center: { lng, lat },
-      strict_intent: true
-    });
+    runSelectionFlow();
   }, [fetchAssociatedEvents, flyToLocation, onboardingPhase, onDismissOnboarding]);
 
   useEffect(() => {
@@ -2421,7 +2430,8 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions, onDis
     let animationId = null;
 
     function spinGlobe(timestamp) {
-      if (!userInteractingRef.current && spinEnabledRef.current && mapRef.current) {
+      const shouldRotate = viewModeRef.current !== 'focused';
+      if (!userInteractingRef.current && spinEnabledRef.current && mapRef.current && shouldRotate) {
         if (lastTimestamp === null) {
           lastTimestamp = timestamp;
         }
