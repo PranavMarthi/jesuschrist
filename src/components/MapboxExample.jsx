@@ -2726,7 +2726,19 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
                 key={`${event.question || 'event'}-${event.slug || event.market_slug || index}`}
                 className="events-modal__tile"
               >
-                <p className="events-modal__question">{event.question || 'Untitled event'}</p>
+                {event.link ? (
+                  <a 
+                    href={event.link} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="events-modal__question events-modal__question--link"
+                  >
+                    {event.question || 'Untitled event'}
+                    <span className="events-modal__external-icon" aria-hidden="true">↗</span>
+                  </a>
+                ) : (
+                  <p className="events-modal__question">{event.question || 'Untitled event'}</p>
+                )}
               </article>
             )) : (
               <p className="events-modal__empty">No markets in this area yet.</p>
