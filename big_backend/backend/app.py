@@ -551,6 +551,7 @@ def load_records(data_path: Path, cache_path: Path) -> tuple[list[dict[str, Any]
                         "longitude",
                         "locations",
                         "category",
+                        "link",
                     ):
                         if key in cache_record:
                             merged[key] = cache_record[key]

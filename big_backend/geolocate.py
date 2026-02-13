@@ -49,7 +49,13 @@ Resolution rules (ordered by priority, apply first matching rule):
 - For matchups/rivalries/series, include both teams' home venues in `locations`.
 
 3) sports_player_or_coach
-- Individual awards/stat leaders: use player's or coach's current team home venue.
+- NBA/NHL/NFL/MLB player awards (MVP, Rookie of Year, All-Star, stat leaders): use player's CURRENT TEAM's home arena/stadium.
+  Examples:
+  - "Will Cooper Flagg win 2025-26 NBA Rookie of Year?" → Duke University Cameron Indoor Stadium, Durham, NC (or NBA team arena if drafted)
+  - "Will Nikola Jokic win 2025-26 NBA MVP?" → Ball Arena, Denver, CO (Denver Nuggets home)
+  - "Will Shai Gilgeous-Alexander win NBA MVP?" → Paycom Center, Oklahoma City, OK (Oklahoma City Thunder home)
+- For college players not yet in pro leagues: use college home arena/stadium.
+- For retired players: use last team's home venue.
 - Tournament-specific outcomes: use tournament venue.
 - For awards and tournaments, include both the event venue and the primary team/person anchor in `locations` when they differ.
 
@@ -832,6 +838,7 @@ def build_error_result(question: str, error: str, source: str = "llm") -> dict[s
         "longitude": None,
         "locations": None,
         "category": None,
+        "link": None,
         "source": source,
         "error": error,
     }
@@ -841,7 +848,7 @@ def to_output_result(question: str, payload: dict[str, Any], source: str) -> dic
     """Ensure canonical output row format including question."""
     if "error" in payload:
         return build_error_result(question, str(payload.get("error")), source=source)
-    return {
+    result = {
         "question": question,
         "entity": payload.get("entity"),
         "reasoning": payload.get("reasoning"),
@@ -852,11 +859,15 @@ def to_output_result(question: str, payload: dict[str, Any], source: str) -> dic
         "category": payload.get("category"),
         "source": source,
     }
+    # Include link if present
+    if "link" in payload:
+        result["link"] = payload["link"]
+    return result
 
 
 def to_cache_payload(result: dict[str, Any]) -> dict[str, Any]:
     """Strip question/error wrapper before persisting successful cache entry."""
-    return {
+    payload = {
         "entity": result["entity"],
         "reasoning": result["reasoning"],
         "location_name": result["location_name"],
@@ -865,6 +876,10 @@ def to_cache_payload(result: dict[str, Any]) -> dict[str, Any]:
         "locations": result["locations"],
         "category": result["category"],
     }
+    # Preserve link if present
+    if "link" in result:
+        payload["link"] = result["link"]
+    return payload
 
 
 def normalize_cached_result(question: str, cached_payload: dict[str, Any]) -> dict[str, Any] | None:
