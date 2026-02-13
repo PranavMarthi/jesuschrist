@@ -19,7 +19,7 @@ const MARKET_COORDS_SOURCE_ID = 'market-coordinates-source';
 const MARKET_COORDS_LAYER_ID = 'market-coordinates-layer';
 const HIGHLIGHT_BUILDING_LAYER_ID = 'highlighted-building-layer';
 
-const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => {
+const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions, onDismissOnboarding }) => {
   const mapContainerRef = useRef();
   const mapRef = useRef();
   const searchInputRef = useRef();
@@ -45,6 +45,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const marketCoordinatesAbortRef = useRef(null);
   const marketHoverLabelRef = useRef(null);
   const highlightedBuildingRef = useRef(null);
+  const openEventsFromMarketCoordinateRef = useRef(() => {});
   const initialViewRef = useRef({
     center: [-100.486052, 30],
     zoom: 1.94,
@@ -69,6 +70,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
   const [associatedEvents, setAssociatedEvents] = useState([]);
   const [eventsModalLocation, setEventsModalLocation] = useState('');
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
+  const [highlightedEventQuestion, setHighlightedEventQuestion] = useState('');
   const [isSpinPaused, setIsSpinPaused] = useState(false);
   const lastEventsLookupRef = useRef('');
   const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
@@ -678,6 +680,33 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     activeItem.scrollIntoView({ block: 'nearest' });
   }, [renderSearch, activeLocationIndex, displayResults.length]);
 
+  useEffect(() => {
+    if (!isEventsModalOpen || !highlightedEventQuestion) return;
+
+    const highlightedTile = document.querySelector('.events-modal__tile--highlighted');
+    if (!highlightedTile) return;
+
+    highlightedTile.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [associatedEvents, highlightedEventQuestion, isEventsModalOpen]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const resizeNow = () => {
+      map.resize();
+      map.triggerRepaint();
+    };
+
+    const rafId = requestAnimationFrame(resizeNow);
+    const timerId = setTimeout(resizeNow, 720);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(timerId);
+    };
+  }, [onboardingPhase, renderSearch, isEventsModalOpen, viewMode]);
+
   const flyToLocation = (center, camera, options = {}) => {
     const map = mapRef.current;
     if (!map) return;
@@ -894,8 +923,45 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     }
   }, []);
 
+  const openEventsFromMarketCoordinate = useCallback((feature) => {
+    if (!feature?.geometry?.coordinates || !Array.isArray(feature.geometry.coordinates)) return;
+
+    const [lng, lat] = feature.geometry.coordinates;
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+
+    const locationName = String(feature?.properties?.location_name || '').trim();
+    const question = String(feature?.properties?.question || '').trim();
+    const placeName = locationName || question || 'Selected market';
+
+    if (typeof onDismissOnboarding === 'function' && onboardingPhase !== 'done') {
+      onDismissOnboarding();
+    }
+
+    setHighlightedEventQuestion(question);
+
+    flyToLocation(
+      [lng, lat],
+      { zoom: 9.8, pitch: 0, bearing: 0 },
+      { prefer3D: false, highlightBuilding: false }
+    );
+
+    void fetchAssociatedEvents({
+      name: placeName,
+      place_name: placeName,
+      place_type: ['poi'],
+      center: { lng, lat },
+      strict_intent: true
+    });
+  }, [fetchAssociatedEvents, flyToLocation, onboardingPhase, onDismissOnboarding]);
+
+  useEffect(() => {
+    openEventsFromMarketCoordinateRef.current = openEventsFromMarketCoordinate;
+  }, [openEventsFromMarketCoordinate]);
+
   const selectResult = async (result) => {
     if (!result) return;
+
+    setHighlightedEventQuestion('');
 
     if (result.kind === 'landmark') {
       const placePayload = buildPlacePayloadFromResult(result);
@@ -1797,6 +1863,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
   const searchLocation = async (event) => {
     event.preventDefault();
+    setHighlightedEventQuestion('');
 
     const trimmedQuery = query.trim();
     const normalizedQuery = trimmedQuery.toLowerCase();
@@ -1987,6 +2054,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setIsEventsModalOpen(false);
     setAssociatedEvents([]);
     setEventsModalLocation('');
+    setHighlightedEventQuestion('');
     lastEventsLookupRef.current = '';
     const transitionId = cameraTransitionRef.current + 1;
     cameraTransitionRef.current = transitionId;
@@ -2042,6 +2110,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
     setIsEventsModalOpen(false);
     setAssociatedEvents([]);
     setEventsModalLocation('');
+    setHighlightedEventQuestion('');
     lastEventsLookupRef.current = '';
 
     const transitionId = cameraTransitionRef.current + 1;
@@ -2428,6 +2497,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         setIsEventsModalOpen(false);
         setAssociatedEvents([]);
         setEventsModalLocation('');
+        setHighlightedEventQuestion('');
         lastEventsLookupRef.current = '';
         returnToBrowseGlobeView();
         return;
@@ -2508,6 +2578,10 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       const map = mapRef.current;
       const label = marketHoverLabelRef.current;
       if (!map || !label) return;
+      if (!map.getLayer(MARKET_COORDS_LAYER_ID)) {
+        hideMarketHoverLabel();
+        return;
+      }
 
       const features = map.queryRenderedFeatures(event.point, { layers: [MARKET_COORDS_LAYER_ID] });
       if (!features.length) {
@@ -2527,12 +2601,15 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       const map = mapRef.current;
       const label = marketHoverLabelRef.current;
       if (!map || !label) return;
+      if (!map.getLayer(MARKET_COORDS_LAYER_ID)) return;
 
       const features = map.queryRenderedFeatures(event.point, { layers: [MARKET_COORDS_LAYER_ID] });
       if (!features.length) {
         hideMarketHoverLabel();
         return;
       }
+
+      const selectedFeature = features[0];
 
       // Show market count label on click (for mobile/touch devices)
       const overlapCount = Number(features[0]?.properties?.overlap_count || 1);
@@ -2543,6 +2620,9 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
 
       // Pause spinning for 5 seconds when clicking a market dot
       pauseSpinningForDuration(5000);
+
+      // Open related events for selected market dot and highlight exact bet
+      openEventsFromMarketCoordinateRef.current(selectedFeature);
 
       // Hide label after 3 seconds
       setTimeout(() => {
@@ -2581,7 +2661,13 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
       if (animationId) cancelAnimationFrame(animationId);
       mapRef.current?.remove();
     };
-  }, [ensureMarketCoordinatesLayer, loadMarketCoordinates, returnToBrowseGlobeView, returnToInstructionsView, pauseSpinningForDuration]);
+  }, [
+    ensureMarketCoordinatesLayer,
+    loadMarketCoordinates,
+    returnToBrowseGlobeView,
+    returnToInstructionsView,
+    pauseSpinningForDuration
+  ]);
 
   return (
     <div className="map-wrapper">
@@ -2713,7 +2799,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
         </div>
       ) : null}
 
-      {onboardingPhase === 'done' && !renderSearch && viewMode === 'focused' && isEventsModalOpen ? (
+      {!renderSearch && viewMode === 'focused' && isEventsModalOpen ? (
         <aside className="events-modal" aria-label="Events for selected location">
           <div className="events-modal__header">
             <p className="events-modal__eyebrow">Related Events</p>
@@ -2724,7 +2810,7 @@ const MapboxExample = ({ onboardingPhase = 'done', onReturnToInstructions }) => 
             {associatedEvents.length ? associatedEvents.map((event, index) => (
               <article
                 key={`${event.question || 'event'}-${event.slug || event.market_slug || index}`}
-                className="events-modal__tile"
+                className={`events-modal__tile${(event.question || '') === highlightedEventQuestion ? ' events-modal__tile--highlighted' : ''}`}
               >
                 {event.link ? (
                   <a 

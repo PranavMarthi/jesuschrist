@@ -25,9 +25,17 @@ function App() {
     setOnboardingPhase('visible')
   }, [])
 
+  const handleDismissOnboardingFromMap = useCallback(() => {
+    setOnboardingPhase('done')
+  }, [])
+
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
-      <MapboxExample onboardingPhase={onboardingPhase} onReturnToInstructions={handleReturnToInstructions} />
+      <MapboxExample
+        onboardingPhase={onboardingPhase}
+        onReturnToInstructions={handleReturnToInstructions}
+        onDismissOnboarding={handleDismissOnboardingFromMap}
+      />
       {onboardingPhase !== 'done' ? <InstructionsModal phase={onboardingPhase} onClose={handleExplore} /> : null}
     </div>
   )
